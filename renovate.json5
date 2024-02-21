@@ -1,0 +1,44 @@
+{
+  "extends": [
+    "local>shared/renovate-config//platform-supported-presets/java-platform-recommended/config"
+  ],
+  "schedule": [
+    "before 7am on Monday"
+  ],
+  /* Enable Java dependency updates */
+  "java": {
+    "enabled": true
+  },
+  /* Allow maximum 5 pull requests at a time */
+  "prConcurrentLimit": 5,
+  "packageRules": [
+    {
+      /* Group minor and patch updates in a single PR */
+      "groupName": "Dependencies Non-Major",
+      "matchManagers": [
+        "maven"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ]
+    },
+    {
+      /* Group major updates in a single PR */
+      "groupName": "Dependencies Major",
+      "matchManagers": [
+        "maven"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      /* Overwrite the schedule for the group */
+      "extends": [
+        "schedule:monthly"
+      ],
+      /* The version has to be released at least 30 days before it is proposed */
+      "stabilityDays": 30
+    }
+  ],
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json"
+}

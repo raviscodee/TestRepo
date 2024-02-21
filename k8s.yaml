@@ -1,0 +1,308 @@
+version: 1.0
+
+template:
+  name: "base-java"
+  version: "5.11.1"
+
+x-istiov2: &x-istiov2
+  enabled: true
+  peerAuthentication:
+    - app:
+        enabled: true
+        mtls:
+          mode: "PERMISSIVE"
+  authorizationPolicy:
+    - app:
+        enabled: true
+        action: ALLOW
+        rules:
+          - to: # Allow requests to liveness/readiness, other paths that have yet to define access rules
+              - operation:
+                  paths: [ "/", "/actuator/health/liveness", "/actuator/health/readiness" ]
+  ratelimit:
+    enabled: false
+    config:
+      domain: "fa"
+      descriptors:
+        - key: header_match
+          value: all_gets
+          rate_limit:
+            unit: second
+            requests_per_unit: 100
+    ratelimitActions:
+      - actions:
+        - header_value_match:
+            descriptor_value: all_gets
+            headers:
+              - name: ":method"
+                prefix_match: "GET"
+    workloadSelector:
+      app: "fa"
+
+# These are configurations related to your service's Datadog APM implementation.
+# If you have questions about these configurations, reach out to the Operational
+# Platforms team on slack in #datadog-help
+
+x-dd-config-map-data: &dd-config-map-data
+  DD_TRACE_ENABLED: "true"
+  DD_TRACE_AGENT_PORT: "8126"
+  DD_TRACE_SAMPLE_RATE: "0.5"
+  # DD_TRACE_SAMPLING_RULES: ""
+  # DD_TRACE_HEADER_TAGS: ""
+  DD_TRACE_PROPAGATION_STYLE_EXTRACT: "datadog"
+  DD_TRACE_PROPAGATION_STYLE_INJECT: "datadog"
+  # Java Additional Configuration
+  DD_JMXFETCH_STATSD_PORT: "8215"
+  DD_KAFKA_CLIENT_PROPAGATION_ENABLED: "false"
+  DD_DATA_STREAMS_ENABLED: "false"
+
+x-http-dd-config-map-data: &http-dd-config-map-data
+  data:
+    DD_SERVICE: "fa"
+    <<: *dd-config-map-data
+# init containers for liquibase migration
+x-migrations: &migrations
+  copy-migrations:
+    name: copy-changelogs
+    image:
+      repository: "wayfair/fa"
+    resources:
+      requests:
+        cpu: 150m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+    command: [ "cp", "-R", "/app/migrations/.", "/migrations" ] # workdir file name may be different
+    volumeMounts:
+      - name: workdir
+        mountPath: /migrations
+  liquibase: &liquibase
+    name: liquibase
+    image:
+      repository: wayfair/liquibase
+      tag: 4.20.0 #don't use latest
+    resources:
+      requests:
+        cpu: 150m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+    volumeMounts:
+      - name: workdir
+        mountPath: /migrations
+    command: [ "liquibase", "update", "--log-level", "info" ]
+
+x-liquibase-env-vars:
+  - &liquibase-environment-changelog-file
+    name: "LIQUIBASE_COMMAND_CHANGELOG_FILE"
+    value: "main_changelog.xml"
+  - &liquibase-environment-db-username ## for IAM create separate dev and prod anchors
+    name: "LIQUIBASE_COMMAND_USERNAME"
+    value: "fadbuser"
+  - &liquibase-environment-jdbc-uri ## for SQL Server create separate dev and prod anchors
+    name: "LIQUIBASE_COMMAND_URL"
+    value: "jdbc:postgresql://fa:5432/fadb"
+  - &liquibase-environment-wait-for-it
+    name: "WAIT_FOR_IT_SECONDS"
+    value: "60"
+  - &liquibase-environment-db-password ## for IAM create separate dev and prod anchors, this is not needed for Spanner
+    name: "VAULT_KEY"
+    value: "test"
+# Values that get passed into our chart
+deploy:
+  applicationName: "fa"
+  applicationNamespace: "fa"
+  applicationNamespaceLabels:
+    istio.io/rev: default
+    # Enable resource automation for determining CPU and memory allocation
+    # See https://docs.csnzoo.com/docker/kubernetes/cluster-reference/resource-automation/ for more information
+    k8s-resource-automation.wayfair.com/webhook: "enable"
+  maintainer: "FA"
+  image:
+    repository: "wayfair/fa"
+  wfDependencies:
+    dynamicSync: false
+    wfConfigFormat: yaml
+  httpService:
+    ingress:
+      enabled: false
+    livenessProbe:
+      path: /actuator/health/liveness
+      port: 8080
+    readinessProbe:
+      path: /actuator/health/readiness
+      port: 8080
+    startupProbe:
+      path: /actuator/health/readiness
+      port: 8080
+      initialDelaySeconds: 60
+      timeoutSeconds: 6
+canary:
+  enabled: true
+  analysis:
+    # schedule interval (default 60s)
+    interval: 1m
+    # max number of failed metric checks before rollback
+    threshold: 2
+    # max traffic percentage routed to canary
+    # percentage (0-100)
+    maxWeight: 50
+    # canary increment step
+    # percentage (0-100)
+    stepWeight: 10
+    metrics:
+      - name: error-ratio
+        thresholdRange:
+          max: 50
+        interval: 60s
+sites:
+  # Specify values per cluster
+  # NOTE: even if you are not overriding anything, you need to specify a list of sites
+  # Due to resource automation, there is no longer a need to specify resource requests and limits
+  # If you want to manually specify these, you will need to disable k8s-resource-automation.wayfair.com/webhook above
+  # See https://docs.csnzoo.com/docker/kubernetes/cluster-reference/resource-automation for more information
+  gke-sdeprod-c3-dsm1:
+    deploymentAnnotations:
+      traffic.sidecar.istio.io/excludeOutboundPorts: "5432"
+    applicationNamespaceAnnotations:
+      iam.gke.io/gcp-service-account: rs381f
+    cloudsql:
+      enabled: true
+      tag: "2.6.0"
+      newProbes: true
+      connectionString: "SpringBootTestR:us:test"
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+    volumes:
+      - name: workdir
+        emptyDir: { }
+    initContainers:
+      <<: *migrations
+      liquibase:
+        <<: *liquibase
+        env:
+        - *liquibase-environment-changelog-file
+        - *liquibase-environment-db-username
+        - *liquibase-environment-db-password
+        - *liquibase-environment-jdbc-uri
+        - *liquibase-environment-wait-for-it
+    canary:
+      analysis:
+        webhooks:
+          - name: load-test
+            url: http://loadtester.flagger/
+            timeout: 5s
+            metadata:
+              cmd: "hey -c 1 -q 5 -z 3m http://kube-fa.service.intradsm1.sdeconsul.csnzoo.com"
+    httpService:
+      hpa:
+        minReplicas: 1
+      envFrom:
+        - configMapRef:
+            name: fa-http-dd-config-map
+    istiov2:
+      <<: *x-istiov2
+      gateway:
+        - app:
+            name: singlehost
+            servers:
+              hosts:
+                - "kube-fa.service.intradsm1.sdeconsul.csnzoo.com"
+            httpRoutes:
+              - route:
+                  paths:
+                    - prefix: "/"
+                  destinationHost: "fa-svc"
+      requestAuthentication:
+        - app:
+            jwtRules:
+              - issuer: "https://ssoauthwayfaircom.csnzoo.com/"
+                jwksUri: "https://ssoauthwayfaircom.csnzoo.com/.well-known/openid-configuration/jwks"
+                forwardOriginalToken: true
+                enabled: true
+    configMaps:
+      - name: fa-http-dd-config-map
+        <<: *http-dd-config-map-data
+    environment:
+      - name: "DD_AGENT_HOST"
+        valueFrom:
+          fieldRef:
+            fieldPath: status.hostIP
+      - name: "DD_JMXFETCH_STATSD_HOST"
+        valueFrom:
+          fieldRef:
+            fieldPath: status.hostIP
+
+  gke-prod-c2-iad1:
+    deploymentAnnotations:
+      traffic.sidecar.istio.io/excludeOutboundPorts: "5432"
+    applicationNamespaceAnnotations:
+      iam.gke.io/gcp-service-account: rs381f
+    cloudsql:
+      enabled: true
+      tag: "2.6.0"
+      newProbes: true
+      connectionString: "SpringBootTestR:us:test"
+      resources:
+        requests:
+          cpu: 150m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+    volumes:
+      - name: workdir
+        emptyDir: { }
+    initContainers:
+      <<: *migrations
+      liquibase:
+        <<: *liquibase
+        env:
+          - *liquibase-environment-changelog-file
+          - *liquibase-environment-db-username
+          - *liquibase-environment-db-password
+          - *liquibase-environment-jdbc-uri
+          - *liquibase-environment-wait-for-it
+    httpService:
+      envFrom:
+        - configMapRef:
+            name: fa-http-dd-config-map
+    istiov2:
+      <<: *x-istiov2
+      gateway:
+        - app:
+            name: singlehost
+            servers:
+              hosts:
+                - "kube-fa.service.intraiad1.consul.csnzoo.com"
+            httpRoutes:
+              - route:
+                  paths:
+                    - prefix: "/"
+                  destinationHost: "fa-svc"
+      requestAuthentication:
+        - app:
+            jwtRules:
+              - issuer: "https://sso.auth.wayfair.com/"
+                jwksUri: "https://sso.auth.wayfair.com/.well-known/openid-configuration/jwks"
+                forwardOriginalToken: true
+                enabled: true
+    configMaps:
+      - name: fa-http-dd-config-map
+        <<: *http-dd-config-map-data
+    environment:
+      - name: "DD_AGENT_HOST"
+        valueFrom:
+          fieldRef:
+            fieldPath: status.hostIP
+      - name: "DD_JMXFETCH_STATSD_HOST"
+        valueFrom:
+          fieldRef:
+            fieldPath: status.hostIP

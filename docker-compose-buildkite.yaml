@@ -1,0 +1,139 @@
+version: '3.4'
+
+# If you update this file, please also update `docker-compose-buildkite.yaml`
+# The difference between the files is that this file exposes ports, while the
+# other does not. This is because if the BK host is running
+
+x-build-args: &build_args
+  GID: 80
+  GROUP: www
+  UID: 1001
+  USER: javamambauser
+
+x-dd-local-config: &dd-local-config
+  DD_SERVICE: "fa"
+  DD_AGENT_HOST: "apmproxy.query.sdeconsul.csnzoo.com"
+  DD_TRACE_ENABLED: "true"
+  DD_TRACE_AGENT_PORT: "31601"
+  DD_TRACE_SAMPLE_RATE: "1"
+  # DD_TRACE_SAMPLING_RULES: ""
+  # DD_TRACE_HEADER_TAGS: ""
+  DD_TRACE_PROPAGATION_STYLE_EXTRACT: "datadog"
+  DD_TRACE_PROPAGATION_STYLE_INJECT: "datadog"
+  DD_ENV: "local"
+  # Java Additional Configuration
+  DD_JMXFETCH_STATSD_HOST: "dogstatsdproxy.query.sdeconsul.csnzoo.com"
+  DD_JMXFETCH_STATSD_PORT: "31600"
+  DD_KAFKA_CLIENT_PROPAGATION_ENABLED: "false"
+  DD_DATA_STREAMS_ENABLED: "false"
+
+services:
+  # Application entrypoint
+  service:
+    build:
+      context: .
+      dockerfile: docker/service.dockerfile
+      args:
+        <<: *build_args
+    environment:
+      ENVIRONMENT: "local"
+      WF_GELFRECEIVER: 'gelf-proxy.service.intradsm1.sdeconsul.csnzoo.com'
+      WF_TELEGRAF_SERVICE: 'general.metricslb.service.intradsm1.sdeconsul.csnzoo.com'
+      WF_TELEGRAF_PORT: '8094'
+      <<: *dd-local-config
+      DB_HOST: psql
+    image: wayfair/fa
+    container_name: fa-service
+    stdin_open: true
+    tty: true
+    networks:
+    - springboottestr
+    volumes:
+    - "./credentials:/wayfair/etc/priv/credentials:ro"
+    - "./docker/files/etc:/wayfair/etc"
+    - "./target:/app/build"
+    depends_on:
+    - secrets
+    - psql
+
+  secrets:
+    image: "wayfair/local-secret-distributor:latest"
+    environment:
+      DISTRIBUTIONS: "k8s_fa-dev"
+    volumes:
+    - "./credentials:/wayfair/etc/priv/k8s_fa-dev"
+    - "~/.vault-token:/root/hosthomedir/.vault-token"
+    - "/var/run/docker.sock:/run/docker.sock"
+
+  unit-test:
+    image: "wayfair/maven-openjdk17:2022.11.LTS.2"
+    environment:
+      ENVIRONMENT: "testing"
+    entrypoint: mvn clean test
+    stdin_open: true
+    tty: true
+    volumes:
+    - ./wayfair/:/app/wayfair
+    - .:/app/source
+    working_dir: "/app/source"
+    networks:
+    - springboottestr
+
+  integration-test:
+    image: "wayfair/maven-openjdk17:2022.11.LTS.2"
+    entrypoint: mvn clean verify -P integration-test
+    environment:
+      ENVIRONMENT: "local"
+      DB_HOST: psql
+    stdin_open: true
+    tty: true
+    volumes:
+    - ./wayfair/:/app/wayfair
+    - .:/app/source
+    working_dir: "/app/source"
+    networks:
+    - springboottestr
+
+    depends_on:
+    - psql
+
+  psql:
+    image: wayfair/postgres14:0.0.1
+    container_name: postgres
+    restart: "always"
+    networks:
+    - springboottestr
+    ports:
+    - 5432:5432
+    environment:
+    - POSTGRES_DB=fadb
+    - POSTGRES_USER=app
+    - POSTGRES_PASSWORD=Password123!
+
+  liquibase:
+    image: wayfair/liquibase:latest
+    depends_on:
+    - psql
+    environment:
+    - LIQUIBASE_COMMAND_URL=jdbc:postgresql://psql:5432/fadb
+    - LIQUIBASE_COMMAND_CHANGELOG_FILE=main_changelog.xml
+    - LIQUIBASE_COMMAND_USERNAME=app
+    - LIQUIBASE_COMMAND_PASSWORD=Password123!
+    - WAIT_FOR_IT_SECONDS=60
+    volumes:
+    - ./migrations:/migrations
+    networks:
+    - springboottestr
+  karate:
+    image: "wayfair/karate-base:1.1.1"
+    working_dir: /workdir
+    entrypoint: /bin/bash
+    command: docker/bin/run_karate.sh
+    volumes:
+    - .:/workdir
+    depends_on:
+    - service
+    networks:
+    - springboottestr
+networks:
+  springboottestr:

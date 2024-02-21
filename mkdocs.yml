@@ -1,0 +1,9 @@
+site_name: "spring-boot-test-r"
+repo_url: "http://github.csnzoo.com/shared/spring-boot-test-r"
+repo_name: "spring-boot-test-r"
+docs_dir: "docs"
+nav:
+  - Overview: "index.md"  # CI copies README.md to docs directory
+theme: "material"
+markdown_extensions:
+  - "codehilite"
